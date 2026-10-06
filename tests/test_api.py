@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import api
-from tests.fakes import FINAL, FakeClient, final_response, function_call, response
+from tests.fakes import FINAL, FakeClient, FakeItem, final_response, function_call, response
 
 CSV = """Order Date,Order ID,Customer ID,Category,Sales,Profit,Region
 2024-01-10,O1,C1,A,100,10,East
@@ -281,3 +281,30 @@ def test_evidence_not_in_tool_results_is_flagged(http, dataset_id):
     assert body["unverified_evidence"] == ["총매출 4.1만 달러"]
     turn = http.get(f"/conversations/{body['conversation_id']}").json()["turns"][0]
     assert turn["unverified_evidence"] == ["총매출 4.1만 달러"]  # 저장된 대화에도 남는다
+
+
+def test_suggest_mapping(http):
+    suggestion = {"date": "Order Date", "sales": "Sales", "order_id": "Order ID", "customer_id": "Customer ID",
+                  "category": "Category", "profit": "Profit", "sub_category": None, "discount": None,
+                  "region": "Region", "segment": None, "date_format": "%Y-%m-%d"}
+    client = use_fake_llm([response([FakeItem(type="message")], json.dumps(suggestion))])
+
+    res = http.post("/datasets/suggest-mapping", files={"file": ("sales.csv", CSV.encode(), "text/csv")})
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["columns"] == ["Order Date", "Order ID", "Customer ID", "Category", "Sales", "Profit", "Region"]
+    assert body["column_map"] == {k: v for k, v in suggestion.items() if v and k != "date_format"}
+    assert body["date_format"] == "%Y-%m-%d"
+    # LLM에는 샘플 몇 행만 보낸다 (CSV는 3행이라 전부)
+    assert len(json.loads(client.requests[0]["input"])["sample_rows"]) == 3
+
+
+def test_suggest_mapping_bad_encoding(http):
+    res = http.post(
+        "/datasets/suggest-mapping",
+        files={"file": ("sales.csv", "주문일,매출\n2024-01-01,100\n".encode("cp949"), "text/csv")},
+        data={"encoding": "utf-8"},
+    )
+
+    assert res.status_code == 422

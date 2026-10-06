@@ -46,5 +46,6 @@ class FakeClient:
 
     def create(self, **kwargs):
         # history는 이후에도 바뀌므로 호출 시점의 상태를 복사해 둔다.
-        self.requests.append({**kwargs, "input": list(kwargs["input"])})
+        sent = kwargs["input"]
+        self.requests.append({**kwargs, "input": list(sent) if isinstance(sent, list) else sent})
         return self.queue.pop(0)

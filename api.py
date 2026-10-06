@@ -32,6 +32,7 @@ import db
 from agent import DEFAULT_MODE, DEFAULT_MODEL, MODES, AgentResult, build_system_prompt, normalize_answer, run_agent
 from analysis import ColumnMap, Dataset, load_data
 from tools import MAX_MONTHS, breakdown, get_summary, monthly_trend
+from mapping import SAMPLE_ROWS, suggest_mapping
 from verify import unverified_evidence
 
 load_dotenv()
@@ -199,6 +200,32 @@ class ConversationOut(BaseModel):
 
 
 # ---------------------------------------------------------------- 엔드포인트
+
+
+class MappingSuggestion(BaseModel):
+    columns: list[str]  # CSV의 전체 컬럼 (화면의 선택 상자용)
+    column_map: dict[str, str]  # 역할 → 컬럼. 추천하지 못한 역할은 빠진다
+    date_format: str | None
+
+
+@app.post("/datasets/suggest-mapping", response_model=MappingSuggestion)
+def suggest_dataset_mapping(
+    file: Annotated[UploadFile, File(description="CSV 파일")],
+    client: Annotated[openai.OpenAI, Depends(get_client)],
+    model: Annotated[str, Depends(get_model)],
+    encoding: Annotated[str, Form()] = "utf-8",
+) -> MappingSuggestion:
+    """LLM이 컬럼 이름과 샘플 몇 행을 보고 매핑을 추천한다. 저장은 하지 않는다 (등록은 POST /datasets)."""
+    try:
+        samples = pd.read_csv(file.file, encoding=encoding, nrows=SAMPLE_ROWS)
+    except (ValueError, pd.errors.ParserError) as e:  # 인코딩 오류(UnicodeDecodeError)도 ValueError다
+        raise HTTPException(422, f"CSV를 읽지 못했습니다. 인코딩을 확인하세요. ({e})") from e
+    columns = [str(c) for c in samples.columns]
+    try:
+        suggestion = suggest_mapping(client, model, columns, samples.astype(str).to_dict("records"))
+    except openai.OpenAIError as e:
+        raise HTTPException(502, f"매핑 추천에 실패했습니다: {e}") from e
+    return MappingSuggestion(columns=columns, **suggestion)
 
 
 @app.post("/datasets", response_model=DatasetOut)

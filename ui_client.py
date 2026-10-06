@@ -82,6 +82,11 @@ class ApiClient:
             form["date_format"] = date_format
         return self._request("POST", "/datasets", files={"file": (filename, data, "text/csv")}, data=form)
 
+    def suggest_mapping(self, filename: str, data: bytes, encoding: str) -> dict:
+        return self._request(
+            "POST", "/datasets/suggest-mapping", files={"file": (filename, data, "text/csv")}, data={"encoding": encoding}
+        )
+
     def summary(self, dataset_id: str) -> dict:
         return self._request("GET", f"/datasets/{dataset_id}/summary")
 

@@ -79,6 +79,24 @@ def register_example() -> dict:
     return st.session_state.example_dataset
 
 
+def default_index(role: str, keywords: list[str], columns: list[str], suggestion: dict | None, optional: bool) -> int:
+    """선택 상자의 기본값 위치. AI 추천이 있으면 추천을, 없으면 컬럼 이름 키워드로 추측한다.
+
+    선택 역할의 상자는 맨 앞에 (없음)이 있어 위치가 1씩 밀린다.
+    """
+    offset = 1 if optional else 0
+    if suggestion is not None:
+        column = suggestion["column_map"].get(role)
+        if column in columns:
+            return columns.index(column) + offset
+        if optional:
+            return 0  # AI가 해당 컬럼이 없다고 판단했다
+    guessed = guess_column(columns, keywords)
+    if optional and not any(k in columns[guessed].lower() for k in keywords):
+        return 0  # 키워드가 맞는 컬럼이 없으면 (없음)
+    return guessed + offset
+
+
 def register_upload() -> dict | None:
     uploaded = st.sidebar.file_uploader("CSV 파일", type="csv")
     if uploaded is None:
@@ -92,21 +110,32 @@ def register_upload() -> dict | None:
         st.sidebar.error(f"파일을 읽지 못했습니다. 인코딩을 바꿔 보세요. ({e})")
         return None
 
+    # AI 추천은 버튼을 눌렀을 때만 받는다 (LLM 호출). 같은 파일·인코딩이면 추천을 다시 쓴다.
+    suggestion_key = (uploaded.name, len(data), encoding)
+    if st.sidebar.button("🤖 AI 매핑 추천", help="컬럼 이름과 샘플 5행만 AI에 보내 매핑을 추천받습니다."):
+        try:
+            st.session_state.mapping_suggestion = (suggestion_key, api().suggest_mapping(uploaded.name, data, encoding))
+        except ApiError as e:
+            st.sidebar.error(str(e))
+    saved = st.session_state.get("mapping_suggestion")
+    suggestion = saved[1] if saved and saved[0] == suggestion_key else None
+    if suggestion:
+        st.sidebar.caption("AI 추천으로 채웠습니다. 확인하고 고친 뒤 등록하세요.")
+
     # form으로 묶어 매핑을 고르는 동안에는 화면이 다시 실행되지 않게 한다.
     with st.sidebar.form("mapping"):
         st.subheader("컬럼 매핑")
         mapping = {}
         for role, (label, keywords) in REQUIRED_ROLES.items():
-            mapping[role] = st.selectbox(label, columns, index=guess_column(columns, keywords))
+            index = default_index(role, keywords, columns, suggestion, optional=False)
+            mapping[role] = st.selectbox(label, columns, index=index)
         for role, (label, keywords) in OPTIONAL_ROLES.items():
-            options = [NONE] + columns
-            # 키워드가 맞는 컬럼이 없으면 (없음)으로 둔다.
-            guessed = guess_column(columns, keywords)
-            index = guessed + 1 if any(k in columns[guessed].lower() for k in keywords) else 0
-            choice = st.selectbox(f"{label} (선택)", options, index=index)
+            index = default_index(role, keywords, columns, suggestion, optional=True)
+            choice = st.selectbox(f"{label} (선택)", [NONE] + columns, index=index)
             if choice != NONE:
                 mapping[role] = choice
-        date_format = st.text_input("날짜 형식 (비우면 자동)", placeholder="%m/%d/%Y") or None
+        suggested_format = (suggestion or {}).get("date_format") or ""
+        date_format = st.text_input("날짜 형식 (비우면 자동)", value=suggested_format, placeholder="%m/%d/%Y") or None
         currency = st.text_input("통화 단위", value="KRW")
         submitted = st.form_submit_button("데이터셋 등록")
 
