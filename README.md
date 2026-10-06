@@ -65,13 +65,25 @@ history_items  id, conversation_id, seq, item(JSON)
 ## 구현 순서 (안)
 1. ✅ 2주차 코드 복사 + `agent.py` 코어/CLI 분리 (CLI는 `cli.py`)
 2. ✅ SQLite 저장소 모듈 (`db.py`) + 테스트
-3. FastAPI: `/datasets` → `/chat` → `/conversations`, `/datasets/{id}/summary` (TestClient로 테스트, API 호출은 가짜 클라이언트)
+3. ✅ FastAPI: `/datasets` → `/chat` → `/conversations`, `/datasets/{id}/summary` (TestClient로 테스트, API 호출은 가짜 클라이언트)
 4. Streamlit: 업로드·매핑 화면(1주차 재사용) → 채팅 화면 (`conversation_id`는 `session_state`)
 5. 실제 API로 전체 흐름 확인
 6. (확장) 스트리밍, LLM 자동 컬럼 매핑
 
+## 실행 방법
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python -m pip install -r requirements.txt
+copy .env.example .env   # 그다음 .env에 OPENAI_API_KEY 입력
+
+.\.venv\Scripts\uvicorn api:app --reload   # API 서버 → http://localhost:8000/docs 에서 직접 호출해 볼 수 있다
+.\.venv\Scripts\python cli.py              # 2주차 터미널 대화 (Superstore 고정)
+.\.venv\Scripts\python -m pytest           # 테스트 (OpenAI 호출 없음)
+```
+- SQLite 파일(`app.db`)과 업로드한 CSV는 `data/`에 저장된다. 위치는 `APP_DATA_DIR` 환경 변수로 바꿀 수 있다.
+
 ## 완료 체크
-- [ ] FastAPI 엔드포인트 + Pydantic 모델
+- [x] FastAPI 엔드포인트 + Pydantic 모델
 - [ ] Streamlit 업로드/채팅 화면
 - [ ] UI ↔ API 연동
 

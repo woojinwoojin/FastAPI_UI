@@ -1,0 +1,170 @@
+"""API 테스트. OpenAI 대신 가짜 클라이언트를 넣고(dependency_overrides), 데이터는 임시 폴더에 저장한다."""
+
+import json
+
+import openai
+import pytest
+from fastapi.testclient import TestClient
+
+import api
+from tests.fakes import FINAL, FakeClient, final_response, function_call, response
+
+CSV = """Order Date,Order ID,Customer ID,Category,Sales,Profit,Region
+2024-01-10,O1,C1,A,100,10,East
+2024-01-10,O1,C1,B,100,20,East
+2024-02-05,O2,C2,A,200,-40,West
+"""
+MAPPING = {"date": "Order Date", "sales": "Sales", "order_id": "Order ID", "customer_id": "Customer ID",
+           "category": "Category", "profit": "Profit", "region": "Region"}
+
+
+@pytest.fixture
+def http(tmp_path, monkeypatch) -> TestClient:
+    monkeypatch.setenv("APP_DATA_DIR", str(tmp_path))
+    api.app.dependency_overrides[api.get_model] = lambda: "test-model"
+    yield TestClient(api.app)
+    api.app.dependency_overrides.clear()
+
+
+def use_fake_llm(responses: list) -> FakeClient:
+    client = FakeClient(responses)
+    api.app.dependency_overrides[api.get_client] = lambda: client
+    return client
+
+
+def upload(http: TestClient, mapping: dict = MAPPING, csv: str = CSV):
+    return http.post(
+        "/datasets",
+        files={"file": ("sales.csv", csv.encode(), "text/csv")},
+        data={"column_map": json.dumps(mapping), "currency": "USD"},
+    )
+
+
+@pytest.fixture
+def dataset_id(http) -> str:
+    return upload(http).json()["dataset_id"]
+
+
+def test_upload_dataset(http, tmp_path):
+    res = upload(http)
+
+    assert res.status_code == 200
+    assert res.json()["rows"] == 3
+    assert res.json()["period"] == "2024-01 ~ 2024-02"
+    assert len(list((tmp_path / "uploads").iterdir())) == 1
+
+
+@pytest.mark.parametrize(
+    "mapping",
+    [
+        {**MAPPING, "sales": "Revenue"},  # CSV에 없는 컬럼
+        {**MAPPING, "price": "Sales"},  # 없는 역할 이름
+        {k: v for k, v in MAPPING.items() if k != "date"},  # 필수 역할 누락
+    ],
+)
+def test_upload_with_bad_mapping_is_rejected_and_file_removed(http, tmp_path, mapping):
+    res = upload(http, mapping)
+
+    assert res.status_code == 422
+    assert list((tmp_path / "uploads").iterdir()) == []
+
+
+def test_upload_requires_column_map(http):
+    res = http.post("/datasets", files={"file": ("sales.csv", CSV.encode(), "text/csv")})
+
+    assert res.status_code == 422  # 필수 form 필드가 없으면 FastAPI가 자동으로 거절한다
+
+
+def test_summary(http, dataset_id):
+    res = http.get(f"/datasets/{dataset_id}/summary")
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["summary"]["total_sales"] == 400
+    assert [r["name"] for r in body["by_category"]["rows"]] == ["A", "B"]
+    assert [m["month"] for m in body["monthly_sales"]["months"]] == ["2024-01", "2024-02"]
+
+
+def test_summary_unknown_dataset(http):
+    assert http.get("/datasets/nope/summary").status_code == 404
+
+
+def test_chat_starts_conversation_and_saves_turn(http, dataset_id):
+    use_fake_llm([response([function_call("get_summary", {}, "c1")]), final_response()])
+
+    res = http.post("/chat", json={"dataset_id": dataset_id, "question": "매출 알려줘", "mode": "fast"})
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["answer"] == FINAL["answer"]
+    assert body["tools_used"] == [{"name": "get_summary", "arguments": "{}"}]
+    assert body["usage"]["mode"] == "fast"
+
+    conversation = http.get(f"/conversations/{body['conversation_id']}").json()
+    assert [t["question"] for t in conversation["turns"]] == ["매출 알려줘"]
+    assert conversation["turns"][0]["suggested_actions"] == FINAL["suggested_actions"]
+
+
+def test_follow_up_question_sends_previous_history(http, dataset_id):
+    use_fake_llm([final_response()])
+    first = http.post("/chat", json={"dataset_id": dataset_id, "question": "첫 질문"}).json()
+
+    client = use_fake_llm([final_response()])
+    http.post(
+        "/chat", json={"dataset_id": dataset_id, "conversation_id": first["conversation_id"], "question": "후속 질문"}
+    )
+
+    # 두 번째 요청에는 첫 질문, 첫 답변, 후속 질문이 순서대로 들어 있어야 한다.
+    sent = client.requests[0]["input"]
+    assert sent[0] == {"role": "user", "content": "첫 질문"}
+    assert sent[1]["type"] == "message"
+    assert sent[-1] == {"role": "user", "content": "후속 질문"}
+    turns = http.get(f"/conversations/{first['conversation_id']}").json()["turns"]
+    assert [t["question"] for t in turns] == ["첫 질문", "후속 질문"]
+
+
+def test_chat_unknown_conversation(http, dataset_id):
+    res = http.post("/chat", json={"dataset_id": dataset_id, "conversation_id": "nope", "question": "q"})
+
+    assert res.status_code == 404
+
+
+def test_chat_conversation_of_other_dataset(http, dataset_id):
+    use_fake_llm([final_response()])
+    conversation_id = http.post("/chat", json={"dataset_id": dataset_id, "question": "q"}).json()["conversation_id"]
+    other_dataset = upload(http).json()["dataset_id"]
+
+    res = http.post("/chat", json={"dataset_id": other_dataset, "conversation_id": conversation_id, "question": "q"})
+
+    assert res.status_code == 400
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"question": "q"},  # dataset_id 누락
+        {"dataset_id": "x", "question": ""},  # 빈 질문
+        {"dataset_id": "x", "question": "q", "mode": "turbo"},  # 없는 모드
+    ],
+)
+def test_chat_validation(http, body):
+    assert http.post("/chat", json=body).status_code == 422
+
+
+class FailingClient:
+    def __init__(self):
+        self.responses = self
+
+    def create(self, **kwargs):
+        raise openai.APIConnectionError(request=None)
+
+
+def test_llm_failure_returns_502_and_saves_nothing(http, dataset_id, tmp_path):
+    api.app.dependency_overrides[api.get_client] = FailingClient
+
+    res = http.post("/chat", json={"dataset_id": dataset_id, "question": "q"})
+
+    assert res.status_code == 502
+    # 새 대화였으므로 대화 자체가 만들어지지 않아야 한다.
+    conn = api.db.connect(tmp_path / "app.db")
+    assert conn.execute("SELECT COUNT(*) FROM conversations").fetchone()[0] == 0
