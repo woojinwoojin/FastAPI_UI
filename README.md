@@ -63,8 +63,8 @@ history_items  id, conversation_id, seq, item(JSON)
 - **SQLite:** `sqlite3` 표준 라이브러리, 테이블·기본 키·외래 키, JSON 문자열 컬럼
 
 ## 구현 순서 (안)
-1. 2주차 코드 복사 + `agent.py` 코어/CLI 분리 (기존 테스트 통과 확인)
-2. SQLite 저장소 모듈 (`db.py`) + 테스트
+1. ✅ 2주차 코드 복사 + `agent.py` 코어/CLI 분리 (CLI는 `cli.py`)
+2. ✅ SQLite 저장소 모듈 (`db.py`) + 테스트
 3. FastAPI: `/datasets` → `/chat` → `/conversations`, `/datasets/{id}/summary` (TestClient로 테스트, API 호출은 가짜 클라이언트)
 4. Streamlit: 업로드·매핑 화면(1주차 재사용) → 채팅 화면 (`conversation_id`는 `session_state`)
 5. 실제 API로 전체 흐름 확인
