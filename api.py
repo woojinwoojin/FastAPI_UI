@@ -32,6 +32,7 @@ import db
 from agent import DEFAULT_MODE, DEFAULT_MODEL, MODES, AgentResult, build_system_prompt, normalize_answer, run_agent
 from analysis import ColumnMap, Dataset, load_data
 from tools import MAX_MONTHS, breakdown, get_summary, monthly_trend
+from verify import unverified_evidence
 
 load_dotenv()
 logging.basicConfig(format="%(levelname)s %(name)s: %(message)s")
@@ -173,6 +174,8 @@ class Answer(BaseModel):
     findings: list[Finding]
     notes: list[str]  # 기간 해석, 확인하지 못한 것, 가설
     suggested_actions: list[Action]
+    # 도구 결과에서 숫자를 찾지 못한 근거 문구 (verify.py). LLM이 계산했거나 잘못 옮겼을 수 있다.
+    unverified_evidence: list[str] = []
 
 
 class ChatResponse(Answer):
@@ -295,17 +298,19 @@ def run_chat_agent(
 def finish_chat(conn: sqlite3.Connection, request: ChatRequest, ctx: ChatContext, result: AgentResult) -> ChatResponse:
     # 답변이 나온 뒤에 대화를 만들어서, 실패한 첫 질문 때문에 빈 대화가 남지 않게 한다.
     conversation_id = request.conversation_id or db.create_conversation(conn, request.dataset_id)
+    # 근거 숫자 검증 결과를 답변과 함께 저장해, 나중에 대화를 불러와도 같은 표시가 보이게 한다.
+    answer = {**result.answer, "unverified_evidence": unverified_evidence(result.answer, ctx.history)}
     db.save_turn(
         conn,
         conversation_id,
         request.question,
         request.mode,
-        result.answer,
+        answer,
         result.tools_used,
         result.usage,
         ctx.history[ctx.checkpoint :],
     )
-    return ChatResponse(conversation_id=conversation_id, **result.answer, tools_used=result.tools_used, usage=result.usage)
+    return ChatResponse(conversation_id=conversation_id, **answer, tools_used=result.tools_used, usage=result.usage)
 
 
 @app.post("/chat", response_model=ChatResponse)

@@ -269,3 +269,15 @@ def test_chat_stream_llm_failure_is_error_event(http, dataset_id, tmp_path):
     assert "답변 생성에 실패했습니다" in events[-1][1]["detail"]
     conn = api.db.connect(tmp_path / "app.db")
     assert conn.execute("SELECT COUNT(*) FROM conversations").fetchone()[0] == 0
+
+
+def test_evidence_not_in_tool_results_is_flagged(http, dataset_id):
+    answer = {**FINAL, "findings": [{"title": "t", "detail": "d", "evidence": ["총매출 400", "총매출 4.1만 달러"]}]}
+    use_fake_llm([response([function_call("get_summary", {}, "c1")]), response([], json.dumps(answer, ensure_ascii=False))])
+
+    body = http.post("/chat", json={"dataset_id": dataset_id, "question": "q"}).json()
+
+    # get_summary 결과에 total_sales 400은 있지만, 4.1만은 LLM이 바꾼 단위라 없다.
+    assert body["unverified_evidence"] == ["총매출 4.1만 달러"]
+    turn = http.get(f"/conversations/{body['conversation_id']}").json()["turns"][0]
+    assert turn["unverified_evidence"] == ["총매출 4.1만 달러"]  # 저장된 대화에도 남는다

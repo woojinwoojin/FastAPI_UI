@@ -127,3 +127,16 @@ def test_llm_failure_during_stream_shows_error(server):
     assert not at.exception
     assert "답변 생성에 실패했습니다" in at.error[0].value
     assert at.session_state.conversation_id is None  # 실패한 질문으로는 대화가 만들어지지 않는다
+
+
+def test_unverified_evidence_is_marked(server):
+    answer = {**FINAL, "findings": [{"title": "t", "detail": "d", "evidence": ["총매출 99,999,999달러"]}]}
+    client = FakeClient([response([FakeItem(type="message")], json.dumps(answer, ensure_ascii=False))])
+    api.app.dependency_overrides[api.get_client] = lambda: client
+    at = run_app()
+
+    at.chat_input[0].set_value("매출 알려줘").run()
+
+    captions = [caption.value for caption in at.caption]
+    assert "⚠️ 총매출 99,999,999달러" in captions
+    assert any("분석 도구 결과에서 찾지 못했습니다" in caption for caption in captions)

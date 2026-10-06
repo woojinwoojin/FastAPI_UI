@@ -164,13 +164,17 @@ def show_answer(answer: dict) -> None:
     """결론 → 발견(근거 숫자) → 참고 → 제안 액션 순서로 그린다."""
     st.markdown(f"**{md(answer['summary'])}**")
 
+    unverified = set(answer.get("unverified_evidence", []))
     for i, finding in enumerate(answer["findings"], 1):
         st.markdown(md(f"**{i}. {finding['title']}**  \n{finding['detail']}"))
         if finding["evidence"]:
-            st.caption(md(" · ".join(finding["evidence"])))
+            st.caption(md(" · ".join(f"⚠️ {e}" if e in unverified else e for e in finding["evidence"])))
 
-    if answer["notes"]:
-        st.caption(md("  \n".join(f"ℹ️ {note}" for note in answer["notes"])))
+    notes = list(answer["notes"])
+    if unverified:
+        notes.append("⚠️ 표시한 근거의 숫자는 분석 도구 결과에서 찾지 못했습니다. LLM이 직접 계산했거나 잘못 옮겼을 수 있습니다.")
+    if notes:
+        st.caption(md("  \n".join(note if note.startswith("⚠️") else f"ℹ️ {note}" for note in notes)))
 
     if answer["suggested_actions"]:
         st.markdown("**제안 액션**")
