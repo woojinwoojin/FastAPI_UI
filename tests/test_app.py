@@ -3,6 +3,8 @@
 TestClient도 httpx.Client라서 ui_client.ApiClient가 그대로 쓸 수 있다. LLM은 가짜 클라이언트다.
 """
 
+import json
+
 import httpx
 import pytest
 from fastapi.testclient import TestClient
@@ -11,7 +13,7 @@ from streamlit.testing.v1 import AppTest
 import api
 import ui_client
 from analysis import SUPERSTORE
-from tests.fakes import FINAL, FakeClient, final_response, function_call, response
+from tests.fakes import FINAL, FakeClient, FakeItem, final_response, function_call, response
 
 pytestmark = pytest.mark.skipif(not SUPERSTORE.path.exists(), reason="기본 데이터(data/) 없음")
 
@@ -51,6 +53,25 @@ def test_chat_shows_answer_and_tools(server):
     assert any("도구 1개" in caption.value for caption in at.caption)
     # 기본 모드는 standard다.
     assert client.requests[0]["reasoning"] == {"effort": "low"}
+
+
+def test_tilde_ranges_are_not_strikethrough(server):
+    # ~ 두 개 사이가 취소선으로 그려지지 않도록, 화면에 그리기 전에 이스케이프해야 한다.
+    answer = {
+        "answer": "할인 21~40% 구간은 -18.3%, 41%~ 구간은 -70.9%입니다.",
+        "suggested_actions": [{"action": "21~40% 할인 축소", "reason": "0~20% 대비 손실", "priority": "high"}],
+    }
+    client = FakeClient([response([FakeItem(type="message")], json.dumps(answer, ensure_ascii=False))])
+    api.app.dependency_overrides[api.get_client] = lambda: client
+    at = run_app()
+
+    at.chat_input[0].set_value("할인 1~2단계 비교").run()
+
+    rendered = [md.value for md in at.markdown]
+    assert r"할인 21\~40% 구간은 -18.3%, 41%\~ 구간은 -70.9%입니다." in rendered
+    assert any(r"21\~40% 할인 축소" in value and r"0\~20% 대비 손실" in value for value in rendered)
+    assert r"할인 1\~2단계 비교" in rendered  # 사용자 질문도 같은 방식으로 그린다
+    assert not any("~" in value.replace(r"\~", "") for value in rendered)
 
 
 def test_api_down_shows_error(monkeypatch):

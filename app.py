@@ -40,6 +40,15 @@ def api() -> ApiClient:
     return ApiClient(ui_client.make_http())
 
 
+def md(text: str) -> str:
+    """마크다운으로 그릴 텍스트의 물결표를 이스케이프한다.
+
+    Streamlit 마크다운은 ~ 두 개 사이를 취소선으로 그린다. LLM 답변에는 "21~40%", "2014-01 ~ 2017-12" 같은
+    범위 표현이 자주 나와서, 그대로 두면 문장 중간에 줄이 그어진다.
+    """
+    return text.replace("~", r"\~")
+
+
 def guess_column(columns: list[str], keywords: list[str]) -> int:
     """컬럼 이름에 키워드가 들어 있으면 그 위치를, 없으면 0을 돌려준다."""
     for i, col in enumerate(columns):
@@ -130,7 +139,7 @@ def show_summary(dataset: dict) -> None:
     data = load_summary(dataset["dataset_id"])
     summary, currency = data["summary"], data["currency"]
 
-    st.caption(f"{dataset['filename']} · 기간 {dataset['period']} · {dataset['rows']:,}행")
+    st.caption(md(f"{dataset['filename']} · 기간 {dataset['period']} · {dataset['rows']:,}행"))
     cols = st.columns(4)
     cols[0].metric(f"총 매출 ({currency})", f"{summary['total_sales']:,}")
     cols[1].metric(f"총 이익 ({currency})", f"{summary['total_profit']:,}" if "total_profit" in summary else "—")
@@ -149,13 +158,13 @@ def show_summary(dataset: dict) -> None:
 
 def show_turn(turn: dict) -> None:
     with st.chat_message("user"):
-        st.write(turn["question"])
+        st.markdown(md(turn["question"]))
     with st.chat_message("assistant"):
-        st.markdown(turn["answer"])
+        st.markdown(md(turn["answer"]))
         if turn["suggested_actions"]:
             st.markdown("**제안 액션**")
             for action in turn["suggested_actions"]:
-                st.markdown(f"- **[{action['priority']}]** {action['action']}  \n  근거: {action['reason']}")
+                st.markdown(md(f"- **[{action['priority']}]** {action['action']}  \n  근거: {action['reason']}"))
         usage = turn["usage"]
         st.caption(
             f"{MODES.get(usage['mode'], usage['mode'])} · {usage['seconds']}초 · 도구 {len(turn['tools_used'])}개 · "
