@@ -41,8 +41,8 @@ MODES = {
 - 질문에 직접 답하는 데 꼭 필요한 도구만, 최대 3개를 한 번에 동시에 호출하세요. 결과를 받은 뒤에는 도구를 더 호출할 수 없습니다.
 - "왜"를 묻는 질문에는 원인을 나눠 보여주는 도구(breakdown, compare_periods, discount_impact)를 고르세요.
   breakdown과 compare_periods 결과에는 합계(total)가 들어 있으므로 get_summary를 따로 부를 필요가 없습니다.
-- answer는 3~5문장으로, 결론과 핵심 숫자만 쓰세요.
-- 원인을 더 좁혀야 하는 질문이면 answer 끝에 "기본/신중 모드에서 더 자세히 확인할 수 있습니다."라고 덧붙이세요.
+- findings는 2개 이내로 쓰세요.
+- 원인을 더 좁혀야 하는 질문이면 notes에 "기본/신중 모드에서 더 자세히 확인할 수 있습니다."를 넣으세요.
 - suggested_actions는 1개 이내로 제안하세요.""",
     ),
     # experiments/compare_modes.py의 "B. wide". 병렬 fast + 종합보다 빠르고, 답변은 careful과 비슷했다.
@@ -55,8 +55,7 @@ MODES = {
 - 원인이 될 만한 여러 관점(부문, 할인, 지역, 기간)을 고려해, 필요한 도구를 최대 6개까지 한 번에 동시에 호출하세요.
   결과를 받은 뒤에는 도구를 더 호출할 수 없습니다.
 - breakdown과 compare_periods 결과에는 합계(total)가 들어 있으므로 get_summary를 따로 부를 필요가 없습니다.
-- "지난달", "요즘"처럼 기간이 모호하면 어떤 기간으로 해석했는지 answer에 밝히세요.
-- answer는 5~8문장으로, 결론과 핵심 숫자만 쓰세요.
+- findings는 4개 이내로 쓰세요.
 - suggested_actions는 3개 이내로 제안하세요.""",
     ),
     # 결과를 보고 다음 조회를 정해 한 단계씩 파고든다 (예: Technology 감소 → 그 안의 하위 카테고리).
@@ -68,7 +67,7 @@ MODES = {
         guide="""[신중 모드]
 - 결론을 내기 전에 비교 기준을 확인하세요. 예: 한 지역의 이익률이 낮다면 다른 지역 또는 전체 평균과 비교하세요.
 - 질문 범위와 관계없는 기준(질문에 없는 지역, 세그먼트 등)까지 둘러보지는 마세요.
-- "지난달", "요즘"처럼 기간이 모호하면 어떤 기간으로 해석했는지 answer에 밝히세요.
+- findings는 5개 이내로 쓰세요.
 - suggested_actions는 3개 이내로 제안하세요.""",
     ),
 }
@@ -83,8 +82,13 @@ SYSTEM_PROMPT = """당신은 이커머스 회사의 시니어 데이터 분석�
 - 데이터로 확인할 수 없는 원인은 가설로 표시하세요.
 - 도구가 error를 돌려주면 available 값 등을 참고해 인자를 고쳐 다시 호출하세요.
 - 금액에는 통화 단위를 붙이세요.
+- 답변은 정해진 구조로 나눠 쓰세요. 한 칸에 모든 내용을 몰아 쓰지 마세요.
+  - summary: 질문에 대한 결론 1~2문장. 가장 중요한 숫자 하나 정도만 넣으세요.
+  - findings: 결론을 뒷받침하는 발견을 중요한 순서로. title은 짧은 명사구, detail은 1~2문장 해석,
+    evidence는 근거 숫자를 "항목 값" 형태의 짧은 조각으로 (예: "Tables 이익률 -8.6%").
+  - notes: 기간을 어떻게 해석했는지("지난달"=2017-12 등), 데이터로 확인하지 못한 것, 가설. 없으면 빈 배열.
 - suggested_actions는 데이터 근거가 있는 비즈니스 액션(가격, 할인, 상품 구성, 마케팅 등)만 우선순위 순으로 제안하세요.
-  "추가 분석", "데이터 확인", "도구 추가" 같은 분석 작업은 액션이 아닙니다. 도구로 확인할 수 없는 한계는 answer에 쓰세요.
+  "추가 분석", "데이터 확인", "도구 추가" 같은 분석 작업은 액션이 아닙니다. 도구로 확인할 수 없는 한계는 notes에 쓰세요.
   근거가 되는 도구 결과가 없으면 suggested_actions는 빈 배열로 두세요.
 
 데이터 정보:
@@ -98,7 +102,30 @@ ANSWER_FORMAT = {
     "schema": {
         "type": "object",
         "properties": {
-            "answer": {"type": "string", "description": "질문에 대한 분석 답변 (근거 숫자 포함)"},
+            "summary": {"type": "string", "description": "질문에 대한 결론 1~2문장"},
+            "findings": {
+                "type": "array",
+                "description": "결론을 뒷받침하는 발견, 중요한 순서",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string", "description": "짧은 명사구. 예: 고할인 구간 적자"},
+                        "detail": {"type": "string", "description": "1~2문장 해석"},
+                        "evidence": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": '근거 숫자 조각. 예: "21~40% 할인 이익률 -18.3%"',
+                        },
+                    },
+                    "required": ["title", "detail", "evidence"],
+                    "additionalProperties": False,
+                },
+            },
+            "notes": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "기간 해석, 확인하지 못한 것, 가설",
+            },
             "suggested_actions": {
                 "type": "array",
                 "items": {
@@ -113,10 +140,38 @@ ANSWER_FORMAT = {
                 },
             },
         },
-        "required": ["answer", "suggested_actions"],
+        "required": ["summary", "findings", "notes", "suggested_actions"],
         "additionalProperties": False,
     },
 }
+
+
+def normalize_answer(answer: dict) -> dict:
+    """예전 형식({"answer": 문자열, "suggested_actions"})으로 저장된 답변을 지금 형식으로 바꾼다."""
+    if "summary" in answer:
+        return answer
+    return {
+        "summary": answer.get("answer", ""),
+        "findings": [],
+        "notes": [],
+        "suggested_actions": answer.get("suggested_actions", []),
+    }
+
+
+def answer_to_text(answer: dict) -> str:
+    """터미널처럼 구조를 그릴 수 없는 곳에서 쓰는 일반 텍스트 버전."""
+    lines = [answer["summary"]]
+    for i, finding in enumerate(answer["findings"], 1):
+        lines += ["", f"{i}. {finding['title']}", f"   {finding['detail']}"]
+        if finding["evidence"]:
+            lines.append("   근거: " + " / ".join(finding["evidence"]))
+    if answer["notes"]:
+        lines += ["", "[참고]"] + [f"- {note}" for note in answer["notes"]]
+    if answer["suggested_actions"]:
+        lines += ["", "[제안 액션]"]
+        for i, action in enumerate(answer["suggested_actions"], 1):
+            lines += [f"{i}. ({action['priority']}) {action['action']}", f"   근거: {action['reason']}"]
+    return "\n".join(lines)
 
 
 def build_system_prompt(df: pd.DataFrame, currency: str) -> str:
@@ -132,7 +187,7 @@ def build_system_prompt(df: pd.DataFrame, currency: str) -> str:
 
 @dataclass
 class AgentResult:
-    answer: dict  # ANSWER_FORMAT 형식: {"answer", "suggested_actions"}
+    answer: dict  # ANSWER_FORMAT 형식: {"summary", "findings", "notes", "suggested_actions"}
     tools_used: list[dict]  # 실제로 실행한 도구: [{"name", "arguments"}] (상한을 넘어 건너뛴 호출은 빠진다)
     usage: dict  # {"mode", "steps", "input_tokens", "output_tokens", "seconds"}
 

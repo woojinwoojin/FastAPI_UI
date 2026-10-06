@@ -36,6 +36,7 @@ OPTIONAL_ROLES = {
 }
 NONE = "(없음)"
 NEW_CONVERSATION = "new"  # 대화 선택 상자에서 "새 대화"를 뜻하는 값
+PRIORITY = {"high": "🔴 높음", "medium": "🟡 중간", "low": "⚪ 낮음"}
 
 
 def api() -> ApiClient:
@@ -159,15 +160,30 @@ def show_summary(dataset: dict) -> None:
 # ---------------------------------------------------------------- 대화
 
 
+def show_answer(answer: dict) -> None:
+    """결론 → 발견(근거 숫자) → 참고 → 제안 액션 순서로 그린다."""
+    st.markdown(f"**{md(answer['summary'])}**")
+
+    for i, finding in enumerate(answer["findings"], 1):
+        st.markdown(md(f"**{i}. {finding['title']}**  \n{finding['detail']}"))
+        if finding["evidence"]:
+            st.caption(md(" · ".join(finding["evidence"])))
+
+    if answer["notes"]:
+        st.caption(md("  \n".join(f"ℹ️ {note}" for note in answer["notes"])))
+
+    if answer["suggested_actions"]:
+        st.markdown("**제안 액션**")
+        for action in answer["suggested_actions"]:
+            badge = PRIORITY.get(action["priority"], action["priority"])
+            st.markdown(md(f"- {badge} **{action['action']}**  \n  근거: {action['reason']}"))
+
+
 def show_turn(turn: dict) -> None:
     with st.chat_message("user"):
         st.markdown(md(turn["question"]))
     with st.chat_message("assistant"):
-        st.markdown(md(turn["answer"]))
-        if turn["suggested_actions"]:
-            st.markdown("**제안 액션**")
-            for action in turn["suggested_actions"]:
-                st.markdown(md(f"- **[{action['priority']}]** {action['action']}  \n  근거: {action['reason']}"))
+        show_answer(turn)
         usage = turn["usage"]
         st.caption(
             f"{MODES.get(usage['mode'], usage['mode'])} · {usage['seconds']}초 · 도구 {len(turn['tools_used'])}개 · "

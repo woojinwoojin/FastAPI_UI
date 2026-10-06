@@ -10,20 +10,14 @@ import os
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from agent import DEFAULT_MODE, DEFAULT_MODEL, MODES, build_system_prompt, run_agent
+from agent import DEFAULT_MODE, DEFAULT_MODEL, MODES, answer_to_text, build_system_prompt, run_agent
 from analysis import SUPERSTORE, load_data
 
 logger = logging.getLogger("agent")
 
 
 def print_answer(answer: dict) -> None:
-    print("\n" + answer["answer"])
-    if answer["suggested_actions"]:
-        print("\n[제안 액션]")
-        for i, action in enumerate(answer["suggested_actions"], 1):
-            print(f"{i}. ({action['priority']}) {action['action']}")
-            print(f"   근거: {action['reason']}")
-    print()
+    print("\n" + answer_to_text(answer) + "\n")
 
 
 def main() -> None:

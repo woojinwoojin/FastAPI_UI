@@ -29,7 +29,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 import db
-from agent import DEFAULT_MODE, DEFAULT_MODEL, MODES, AgentResult, build_system_prompt, run_agent
+from agent import DEFAULT_MODE, DEFAULT_MODEL, MODES, AgentResult, build_system_prompt, normalize_answer, run_agent
 from analysis import ColumnMap, Dataset, load_data
 from tools import MAX_MONTHS, breakdown, get_summary, monthly_trend
 
@@ -160,19 +160,30 @@ class Usage(BaseModel):
     seconds: float
 
 
-class ChatResponse(BaseModel):
-    conversation_id: str
-    answer: str
+class Finding(BaseModel):
+    title: str
+    detail: str
+    evidence: list[str]  # 근거 숫자 조각
+
+
+class Answer(BaseModel):
+    """Agent 답변. 결론 → 발견 → 참고 → 액션으로 나눠 화면이 구조대로 그릴 수 있게 한다."""
+
+    summary: str
+    findings: list[Finding]
+    notes: list[str]  # 기간 해석, 확인하지 못한 것, 가설
     suggested_actions: list[Action]
+
+
+class ChatResponse(Answer):
+    conversation_id: str
     tools_used: list[ToolCall]
     usage: Usage
 
 
-class Turn(BaseModel):
+class Turn(Answer):
     question: str
     mode: str
-    answer: str
-    suggested_actions: list[Action]
     tools_used: list[ToolCall]
     usage: Usage
     created_at: str
@@ -370,10 +381,9 @@ def get_conversation(conversation_id: str, conn: Conn) -> ConversationOut:
         raise HTTPException(404, f"대화가 없습니다: {conversation_id}")
     turns = [
         Turn(
+            **normalize_answer(turn["answer"]),  # 예전 형식으로 저장된 답변도 같은 구조로 보여준다
             question=turn["question"],
             mode=turn["mode"],
-            answer=turn["answer"]["answer"],
-            suggested_actions=turn["answer"]["suggested_actions"],
             tools_used=turn["tools_used"],
             usage=turn["usage"],
             created_at=turn["created_at"],

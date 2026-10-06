@@ -5,7 +5,12 @@ from types import SimpleNamespace
 
 # strict 스키마라 LLM은 필터를 안 쓸 때도 모든 항목을 null로 채워 보낸다.
 NO_FILTERS = {"category": None, "sub_category": None, "region": None, "segment": None}
-FINAL = {"answer": "답변", "suggested_actions": [{"action": "A", "reason": "R", "priority": "high"}]}
+FINAL = {
+    "summary": "결론",
+    "findings": [{"title": "발견", "detail": "설명", "evidence": ["A 이익률 -8.6%"]}],
+    "notes": ["기간은 전체로 해석"],
+    "suggested_actions": [{"action": "A", "reason": "R", "priority": "high"}],
+}
 
 
 class FakeItem(SimpleNamespace):

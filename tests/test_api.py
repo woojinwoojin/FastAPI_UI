@@ -119,7 +119,7 @@ def test_chat_starts_conversation_and_saves_turn(http, dataset_id):
 
     assert res.status_code == 200
     body = res.json()
-    assert body["answer"] == FINAL["answer"]
+    assert {k: body[k] for k in FINAL} == FINAL  # summary, findings, notes, suggested_actions
     assert body["tools_used"] == [{"name": "get_summary", "arguments": "{}"}]
     assert body["usage"]["mode"] == "fast"
 
@@ -163,6 +163,20 @@ def test_list_conversations_newest_first(http, dataset_id):
 
 def test_list_conversations_unknown_dataset(http):
     assert http.get("/datasets/nope/conversations").status_code == 404
+
+
+def test_old_answer_format_is_converted(http, dataset_id, tmp_path):
+    # 답변 구조를 바꾸기 전에 저장된 대화({"answer": 문자열})도 같은 구조로 보여야 한다.
+    conn = api.db.connect(tmp_path / "app.db")
+    conversation_id = api.db.create_conversation(conn, dataset_id)
+    old = {"answer": "예전 답변", "suggested_actions": []}
+    api.db.save_turn(conn, conversation_id, "q", "fast", old, [], {"mode": "fast", "steps": 1, "input_tokens": 1,
+                     "output_tokens": 1, "seconds": 1.0}, [])
+    conn.close()
+
+    turn = http.get(f"/conversations/{conversation_id}").json()["turns"][0]
+
+    assert (turn["summary"], turn["findings"], turn["notes"]) == ("예전 답변", [], [])
 
 
 def test_chat_unknown_conversation(http, dataset_id):
@@ -234,7 +248,7 @@ def test_chat_stream_sends_progress_then_answer(http, dataset_id):
     assert [name for name, _ in events] == ["llm_call", "tool", "llm_call", "done"]
     assert events[1][1] == {"type": "tool", "name": "get_summary", "arguments": "{}"}
     done = events[-1][1]
-    assert done["answer"] == FINAL["answer"]
+    assert done["summary"] == FINAL["summary"]
     # 스트리밍으로 받은 답변도 /chat과 똑같이 저장된다.
     turns = http.get(f"/conversations/{done['conversation_id']}").json()["turns"]
     assert [t["question"] for t in turns] == ["매출 알려줘"]
