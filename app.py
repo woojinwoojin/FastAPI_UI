@@ -6,6 +6,7 @@
 """
 
 import io
+import json
 from datetime import datetime
 
 import pandas as pd
@@ -178,6 +179,21 @@ def show_turn(turn: dict) -> None:
                     st.code(f"{tool['name']}({tool['arguments']})", language="json")
 
 
+def describe_tool(name: str, arguments: str) -> str:
+    """도구 호출을 사람이 읽기 쉽게: breakdown(group_by=category, region=Central). 값이 없는 인자는 뺀다."""
+    try:
+        args = json.loads(arguments)
+    except json.JSONDecodeError:
+        return f"{name}({arguments})"
+    parts = []
+    for key, value in args.items():
+        if key == "filters" and isinstance(value, dict):
+            parts += [f"{k}={v}" for k, v in value.items() if v is not None]
+        elif value is not None:
+            parts.append(f"{key}={value}")
+    return f"{name}({', '.join(parts)})"
+
+
 def local_time(iso: str) -> str:
     # DB에는 UTC로 저장되어 있으므로, 화면에는 이 컴퓨터의 시간대로 보여준다.
     return datetime.fromisoformat(iso).astimezone().strftime("%m-%d %H:%M")
@@ -217,12 +233,26 @@ def show_chat(dataset: dict) -> None:
     question = st.chat_input("예: Furniture 이익률이 왜 낮아?")
     if not question:
         return
-    with st.spinner("분석하는 중..."):
+    with st.chat_message("user"):
+        st.markdown(md(question))
+    result = None
+    # 답변을 기다리는 동안 Agent가 무엇을 하고 있는지 한 줄씩 보여준다.
+    with st.status("질문을 이해하고 필요한 분석을 고르는 중...", expanded=True) as status:
         try:
-            result = api().chat(dataset["dataset_id"], st.session_state.conversation_id, question, mode)
+            for event, data in api().chat_stream(dataset["dataset_id"], st.session_state.conversation_id, question, mode):
+                if event == "llm_call" and data["step"] > 1:
+                    status.update(label="분석 결과를 보고 판단하는 중...")
+                elif event == "tool":
+                    status.write(md(f"🔧 {describe_tool(data['name'], data['arguments'])}"))
+                elif event == "skip":
+                    status.write(md(f"⏭ {data['name']} 건너뜀 (이 모드의 도구 호출 상한)"))
+                elif event == "done":
+                    result = data
         except ApiError as e:
+            status.update(label="답변을 만들지 못했습니다", state="error")
             st.error(str(e))
             return
+        status.update(label=f"완료 · {result['usage']['seconds']}초", state="complete")
     st.session_state.conversation_id = result["conversation_id"]
     st.session_state.turns.append({"question": question, **result})
     # 사이드바의 대화 목록에도 방금 질문이 반영되도록 화면을 다시 그린다.

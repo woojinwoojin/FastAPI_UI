@@ -12,8 +12,11 @@ import hashlib
 import json
 import logging
 import os
+import queue
 import sqlite3
-from collections.abc import Iterator
+import threading
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
@@ -22,10 +25,11 @@ import openai
 import pandas as pd
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 import db
-from agent import DEFAULT_MODE, DEFAULT_MODEL, MODES, build_system_prompt, run_agent
+from agent import DEFAULT_MODE, DEFAULT_MODEL, MODES, AgentResult, build_system_prompt, run_agent
 from analysis import ColumnMap, Dataset, load_data
 from tools import MAX_MONTHS, breakdown, get_summary, monthly_trend
 
@@ -240,13 +244,16 @@ def dataset_summary(dataset_id: str, conn: Conn) -> dict:
     }
 
 
-@app.post("/chat", response_model=ChatResponse)
-def chat(
-    request: ChatRequest,
-    conn: Conn,
-    client: Annotated[openai.OpenAI, Depends(get_client)],
-    model: Annotated[str, Depends(get_model)],
-) -> ChatResponse:
+@dataclass
+class ChatContext:
+    dataset: dict
+    df: pd.DataFrame
+    history: list[dict]
+    checkpoint: int  # 이번 질문 전까지의 기록 길이. 이후 항목이 이번 질문으로 새로 생긴 기록이다
+
+
+def prepare_chat(conn: sqlite3.Connection, request: ChatRequest) -> ChatContext:
+    """질문을 처리하기 전 검증과 기록 불러오기. 잘못된 요청은 여기서 404/400으로 끝난다."""
     dataset, df = dataset_or_404(conn, request.dataset_id)
 
     history: list[dict] = []
@@ -260,14 +267,21 @@ def chat(
 
     checkpoint = len(history)
     history.append({"role": "user", "content": request.question})
-    try:
-        result = run_agent(
-            client, model, df, build_system_prompt(df, dataset["currency"]), history, MODES[request.mode]
-        )
-    except (openai.OpenAIError, RuntimeError) as e:
-        # LLM 쪽 실패는 저장하지 않는다. 새 대화였다면 대화도 만들지 않는다.
-        raise HTTPException(502, f"답변 생성에 실패했습니다: {e}") from e
+    return ChatContext(dataset, df, history, checkpoint)
 
+
+def run_chat_agent(
+    client: openai.OpenAI,
+    model: str,
+    request: ChatRequest,
+    ctx: ChatContext,
+    on_event: Callable[[dict], None] | None = None,
+) -> AgentResult:
+    instructions = build_system_prompt(ctx.df, ctx.dataset["currency"])
+    return run_agent(client, model, ctx.df, instructions, ctx.history, MODES[request.mode], on_event)
+
+
+def finish_chat(conn: sqlite3.Connection, request: ChatRequest, ctx: ChatContext, result: AgentResult) -> ChatResponse:
     # 답변이 나온 뒤에 대화를 만들어서, 실패한 첫 질문 때문에 빈 대화가 남지 않게 한다.
     conversation_id = request.conversation_id or db.create_conversation(conn, request.dataset_id)
     db.save_turn(
@@ -278,9 +292,75 @@ def chat(
         result.answer,
         result.tools_used,
         result.usage,
-        history[checkpoint:],
+        ctx.history[ctx.checkpoint :],
     )
     return ChatResponse(conversation_id=conversation_id, **result.answer, tools_used=result.tools_used, usage=result.usage)
+
+
+@app.post("/chat", response_model=ChatResponse)
+def chat(
+    request: ChatRequest,
+    conn: Conn,
+    client: Annotated[openai.OpenAI, Depends(get_client)],
+    model: Annotated[str, Depends(get_model)],
+) -> ChatResponse:
+    ctx = prepare_chat(conn, request)
+    try:
+        result = run_chat_agent(client, model, request, ctx)
+    except (openai.OpenAIError, RuntimeError) as e:
+        # LLM 쪽 실패는 저장하지 않는다. 새 대화였다면 대화도 만들지 않는다.
+        raise HTTPException(502, f"답변 생성에 실패했습니다: {e}") from e
+    return finish_chat(conn, request, ctx, result)
+
+
+def sse(event: str, data: dict) -> str:
+    """Server-Sent Events 한 건. 빈 줄로 이벤트를 구분한다."""
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+@app.post("/chat/stream")
+def chat_stream(
+    request: ChatRequest,
+    conn: Conn,
+    client: Annotated[openai.OpenAI, Depends(get_client)],
+    model: Annotated[str, Depends(get_model)],
+) -> StreamingResponse:
+    """/chat과 같지만, 진행 상황을 SSE 이벤트로 보낸다.
+
+    이벤트: llm_call, tool, skip (진행 상황) → done (ChatResponse) 또는 error ({"detail"})
+    스트리밍이 시작되면 상태 코드는 이미 200이라, 도중의 실패는 error 이벤트로 알린다.
+    """
+    ctx = prepare_chat(conn, request)  # 잘못된 요청은 스트리밍 전에 일반 HTTP 오류로 끝낸다
+    events: queue.Queue[tuple[str, dict]] = queue.Queue()
+
+    def work() -> None:
+        # Agent는 별도 스레드에서 돌리고, 진행 상황은 큐를 거쳐 응답으로 흘려보낸다.
+        try:
+            result = run_chat_agent(client, model, request, ctx, on_event=lambda e: events.put((e["type"], e)))
+            # sqlite3 연결은 만든 스레드에서만 쓸 수 있으므로, 이 스레드에서 저장할 연결을 따로 연다.
+            worker_conn = db.connect(data_dir() / "app.db")
+            try:
+                response = finish_chat(worker_conn, request, ctx, result)
+            finally:
+                worker_conn.close()
+            events.put(("done", response.model_dump()))
+        except (openai.OpenAIError, RuntimeError) as e:
+            events.put(("error", {"detail": f"답변 생성에 실패했습니다: {e}"}))
+        except Exception:
+            logging.getLogger(__name__).exception("chat_stream 실패")
+            events.put(("error", {"detail": "서버 오류로 답변을 만들지 못했습니다."}))
+
+    threading.Thread(target=work, daemon=True).start()
+
+    def stream() -> Iterator[str]:
+        while True:
+            event, data = events.get()
+            yield sse(event, data)
+            if event in ("done", "error"):
+                return
+
+    # 일반 이터레이터라 Starlette가 스레드 풀에서 돌린다. events.get()에서 기다려도 서버가 멈추지 않는다.
+    return StreamingResponse(stream(), media_type="text/event-stream")
 
 
 @app.get("/conversations/{conversation_id}", response_model=ConversationOut)

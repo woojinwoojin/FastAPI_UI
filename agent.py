@@ -7,6 +7,7 @@ CLI(cli.py)와 API 서버가 함께 쓴다. 화면 출력이나 저장은 하지
 import json
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import pandas as pd
@@ -137,17 +138,29 @@ class AgentResult:
 
 
 def run_agent(
-    client: OpenAI, model: str, df: pd.DataFrame, instructions: str, history: list, mode: Mode = MODES[DEFAULT_MODE]
+    client: OpenAI,
+    model: str,
+    df: pd.DataFrame,
+    instructions: str,
+    history: list,
+    mode: Mode = MODES[DEFAULT_MODE],
+    on_event: Callable[[dict], None] | None = None,
 ) -> AgentResult:
     """history(대화 기록)에 질문이 들어 있는 상태로 호출한다. 도구 호출과 답변이 history에 추가된다.
 
     history의 항목은 모두 JSON으로 바꿀 수 있는 dict다. 그대로 저장했다가 다음 질문 때 다시 넘기면 된다.
+    on_event를 주면 진행 상황을 알려준다 (화면에 실시간으로 보여주기 위해):
+      {"type": "llm_call", "step": 2}
+      {"type": "tool", "name": "breakdown", "arguments": "{...}"}
+      {"type": "skip", "name": "breakdown"}  상한을 넘어 실행하지 않은 호출
     """
+    emit = on_event or (lambda event: None)
     input_tokens = output_tokens = 0
     tools_used: list[dict] = []
     started = time.perf_counter()
 
     for step in range(1, mode.max_steps + 1):
+        emit({"type": "llm_call", "step": step})
         response = client.responses.create(
             model=model,
             instructions=f"{instructions}\n\n{mode.guide}",
@@ -183,12 +196,14 @@ def run_agent(
             # 모든 function_call에는 짝이 되는 output이 있어야 하므로, 상한을 넘은 호출에도 결과 대신 error를 돌려준다.
             if len(tools_used) >= mode.max_tool_calls:
                 logger.info("[skip] %s (도구 호출 상한 %d개)", call.name, mode.max_tool_calls)
+                emit({"type": "skip", "name": call.name})
                 output = json.dumps(
                     {"error": f"{mode.name} 모드의 도구 호출 상한({mode.max_tool_calls}개)을 넘었습니다. 지금까지의 결과로 답하세요."},
                     ensure_ascii=False,
                 )
             else:
                 logger.info("[tool] %s(%s)", call.name, call.arguments)
+                emit({"type": "tool", "name": call.name, "arguments": call.arguments})
                 output = run_tool(df, call.name, call.arguments)
                 tools_used.append({"name": call.name, "arguments": call.arguments})
             history.append(

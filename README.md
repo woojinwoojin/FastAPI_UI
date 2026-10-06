@@ -40,7 +40,14 @@ Streamlit ──HTTP──► FastAPI ──► Agent (2주차) ──► Pandas
 | `POST` | `/datasets` | CSV 파일 + 컬럼 매핑·인코딩·날짜 형식·통화 (multipart) | `dataset_id`, 기간, 행 수 |
 | `GET` | `/datasets/{id}/summary` | — | KPI 카드·차트용 요약 (`get_summary`, `breakdown`, `monthly_trend` 결과) |
 | `POST` | `/chat` | `dataset_id`, `conversation_id`(없으면 새 대화), `question`, `mode` | `conversation_id`, `answer`, `suggested_actions`, `tools_used`, `usage`(시간·토큰) |
+| `POST` | `/chat/stream` | `/chat`과 같음 | SSE 이벤트: `llm_call`, `tool`, `skip` (진행 상황) → `done` (`/chat` 응답과 같은 본문) 또는 `error` |
+| `GET` | `/datasets/{id}/conversations` | — | 이전 대화 목록 (최근 질문 순, 첫 질문을 제목으로) |
 | `GET` | `/conversations/{id}` | — | 지난 질문과 답변 목록 (화면 복원용) |
+
+- 같은 파일·같은 설정으로 다시 올리면 기존 데이터셋을 돌려준다(`reused: true`). 새로고침해도 데이터셋 id가 같아 이전 대화를 이어 갈 수 있다.
+- `/chat/stream`은 답변 글자가 아니라 **진행 상황**을 스트리밍한다. 기다리는 시간은 대부분 LLM 왕복과 도구 실행이고,
+  답변은 JSON(Structured Output)이라 글자 단위로 흘려보내면 반쯤 만든 JSON을 화면에서 해석해야 하기 때문이다.
+  스트리밍이 시작되면 상태 코드는 이미 200이라, 도중의 실패는 `error` 이벤트로 알린다.
 
 ## SQLite 테이블 (초안)
 ```
@@ -67,8 +74,8 @@ history_items  id, conversation_id, seq, item(JSON)
 2. ✅ SQLite 저장소 모듈 (`db.py`) + 테스트
 3. ✅ FastAPI: `/datasets` → `/chat` → `/conversations`, `/datasets/{id}/summary` (TestClient로 테스트, API 호출은 가짜 클라이언트)
 4. ✅ Streamlit: 업로드·매핑 화면(1주차 재사용) → 채팅 화면 (`conversation_id`는 `session_state`)
-5. 실제 API로 전체 흐름 확인
-6. (확장) 스트리밍, LLM 자동 컬럼 매핑
+5. ✅ 실제 API로 전체 흐름 확인
+6. (확장) ✅ 진행 상황 스트리밍, ✅ 이전 대화 불러오기, LLM 자동 컬럼 매핑
 
 ## 실행 방법
 ```powershell

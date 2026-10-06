@@ -107,3 +107,16 @@ def test_api_down_shows_error(monkeypatch):
 
     assert not at.exception
     assert "API 서버에 연결하지 못했습니다" in at.error[0].value
+
+
+def test_llm_failure_during_stream_shows_error(server):
+    from tests.test_api import FailingClient
+
+    api.app.dependency_overrides[api.get_client] = FailingClient
+    at = run_app()
+
+    at.chat_input[0].set_value("매출 알려줘").run()
+
+    assert not at.exception
+    assert "답변 생성에 실패했습니다" in at.error[0].value
+    assert at.session_state.conversation_id is None  # 실패한 질문으로는 대화가 만들어지지 않는다

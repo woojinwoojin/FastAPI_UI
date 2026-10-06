@@ -210,3 +210,48 @@ def test_llm_failure_returns_502_and_saves_nothing(http, dataset_id, tmp_path):
     # 새 대화였으므로 대화 자체가 만들어지지 않아야 한다.
     conn = api.db.connect(tmp_path / "app.db")
     assert conn.execute("SELECT COUNT(*) FROM conversations").fetchone()[0] == 0
+
+
+def read_sse(http: TestClient, body: dict) -> list[tuple[str, dict]]:
+    """SSE 응답을 (event, data) 목록으로 읽는다."""
+    events, event = [], None
+    with http.stream("POST", "/chat/stream", json=body) as res:
+        assert res.status_code == 200
+        assert res.headers["content-type"].startswith("text/event-stream")
+        for line in res.iter_lines():
+            if line.startswith("event: "):
+                event = line.removeprefix("event: ")
+            elif line.startswith("data: "):
+                events.append((event, json.loads(line.removeprefix("data: "))))
+    return events
+
+
+def test_chat_stream_sends_progress_then_answer(http, dataset_id):
+    use_fake_llm([response([function_call("get_summary", {}, "c1")]), final_response()])
+
+    events = read_sse(http, {"dataset_id": dataset_id, "question": "매출 알려줘", "mode": "fast"})
+
+    assert [name for name, _ in events] == ["llm_call", "tool", "llm_call", "done"]
+    assert events[1][1] == {"type": "tool", "name": "get_summary", "arguments": "{}"}
+    done = events[-1][1]
+    assert done["answer"] == FINAL["answer"]
+    # 스트리밍으로 받은 답변도 /chat과 똑같이 저장된다.
+    turns = http.get(f"/conversations/{done['conversation_id']}").json()["turns"]
+    assert [t["question"] for t in turns] == ["매출 알려줘"]
+
+
+def test_chat_stream_validates_before_streaming(http, dataset_id):
+    res = http.post("/chat/stream", json={"dataset_id": dataset_id, "conversation_id": "nope", "question": "q"})
+
+    assert res.status_code == 404  # 스트리밍을 시작하기 전이라 일반 HTTP 오류로 끝난다
+
+
+def test_chat_stream_llm_failure_is_error_event(http, dataset_id, tmp_path):
+    api.app.dependency_overrides[api.get_client] = FailingClient
+
+    events = read_sse(http, {"dataset_id": dataset_id, "question": "q"})
+
+    assert [name for name, _ in events] == ["llm_call", "error"]
+    assert "답변 생성에 실패했습니다" in events[-1][1]["detail"]
+    conn = api.db.connect(tmp_path / "app.db")
+    assert conn.execute("SELECT COUNT(*) FROM conversations").fetchone()[0] == 0

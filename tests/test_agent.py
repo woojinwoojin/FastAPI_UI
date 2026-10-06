@@ -135,3 +135,26 @@ def test_history_is_json_serializable(df):
     assert json.loads(json.dumps(history)) == history
     assert history[1] == {"type": "function_call", "name": "get_summary", "arguments": "{}", "call_id": "c1"}
     assert history[-1] == {"type": "message"}  # None 값은 저장하지 않는다
+
+
+def test_reports_progress_events(df):
+    client = FakeClient([response([function_call("get_summary", {}, "c1")]), final_response()])
+    events = []
+
+    run_agent(client, "m", df, "sys", [{"role": "user", "content": "q"}], on_event=events.append)
+
+    assert events == [
+        {"type": "llm_call", "step": 1},
+        {"type": "tool", "name": "get_summary", "arguments": "{}"},
+        {"type": "llm_call", "step": 2},
+    ]
+
+
+def test_reports_skipped_calls(df):
+    calls = [function_call("get_summary", {}, f"c{i}") for i in range(4)]
+    client = FakeClient([response(calls), final_response()])
+    events = []
+
+    run_agent(client, "m", df, "sys", [{"role": "user", "content": "q"}], MODES["fast"], on_event=events.append)
+
+    assert [e["type"] for e in events] == ["llm_call", "tool", "tool", "tool", "skip", "llm_call"]
