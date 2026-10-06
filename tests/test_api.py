@@ -32,11 +32,11 @@ def use_fake_llm(responses: list) -> FakeClient:
     return client
 
 
-def upload(http: TestClient, mapping: dict = MAPPING, csv: str = CSV):
+def upload(http: TestClient, mapping: dict = MAPPING, csv: str = CSV, currency: str = "USD"):
     return http.post(
         "/datasets",
         files={"file": ("sales.csv", csv.encode(), "text/csv")},
-        data={"column_map": json.dumps(mapping), "currency": "USD"},
+        data={"column_map": json.dumps(mapping), "currency": currency},
     )
 
 
@@ -73,6 +73,29 @@ def test_upload_requires_column_map(http):
     res = http.post("/datasets", files={"file": ("sales.csv", CSV.encode(), "text/csv")})
 
     assert res.status_code == 422  # 필수 form 필드가 없으면 FastAPI가 자동으로 거절한다
+
+
+def test_same_upload_reuses_dataset(http, tmp_path):
+    first = upload(http).json()
+    second = upload(http).json()
+
+    assert second["dataset_id"] == first["dataset_id"]
+    assert (first["reused"], second["reused"]) == (False, True)
+    assert len(list((tmp_path / "uploads").iterdir())) == 1  # 파일도 한 번만 저장한다
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"csv": CSV + "2024-03-01,O3,C3,A,50,5,East\n"},  # 내용이 다르다
+        {"mapping": {k: v for k, v in MAPPING.items() if k != "region"}},  # 매핑이 다르다
+        {"currency": "KRW"},  # 설정이 다르다
+    ],
+)
+def test_different_upload_creates_new_dataset(http, change):
+    first = upload(http).json()
+
+    assert upload(http, **change).json()["dataset_id"] != first["dataset_id"]
 
 
 def test_summary(http, dataset_id):
@@ -123,6 +146,25 @@ def test_follow_up_question_sends_previous_history(http, dataset_id):
     assert [t["question"] for t in turns] == ["첫 질문", "후속 질문"]
 
 
+def test_list_conversations_newest_first(http, dataset_id):
+    use_fake_llm([final_response(), final_response(), final_response()])
+    older = http.post("/chat", json={"dataset_id": dataset_id, "question": "첫 대화"}).json()["conversation_id"]
+    newer = http.post("/chat", json={"dataset_id": dataset_id, "question": "둘째 대화"}).json()["conversation_id"]
+    # 오래된 대화에 질문을 더하면 그 대화가 맨 위로 올라와야 한다.
+    http.post("/chat", json={"dataset_id": dataset_id, "conversation_id": older, "question": "이어서"})
+
+    conversations = http.get(f"/datasets/{dataset_id}/conversations").json()
+
+    assert [(c["conversation_id"], c["title"], c["turn_count"]) for c in conversations] == [
+        (older, "첫 대화", 2),
+        (newer, "둘째 대화", 1),
+    ]
+
+
+def test_list_conversations_unknown_dataset(http):
+    assert http.get("/datasets/nope/conversations").status_code == 404
+
+
 def test_chat_unknown_conversation(http, dataset_id):
     res = http.post("/chat", json={"dataset_id": dataset_id, "conversation_id": "nope", "question": "q"})
 
@@ -132,7 +174,7 @@ def test_chat_unknown_conversation(http, dataset_id):
 def test_chat_conversation_of_other_dataset(http, dataset_id):
     use_fake_llm([final_response()])
     conversation_id = http.post("/chat", json={"dataset_id": dataset_id, "question": "q"}).json()["conversation_id"]
-    other_dataset = upload(http).json()["dataset_id"]
+    other_dataset = upload(http, currency="KRW").json()["dataset_id"]  # 설정이 다르면 다른 데이터셋
 
     res = http.post("/chat", json={"dataset_id": other_dataset, "conversation_id": conversation_id, "question": "q"})
 

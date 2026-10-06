@@ -55,5 +55,8 @@ class ApiClient:
         body = {"dataset_id": dataset_id, "conversation_id": conversation_id, "question": question, "mode": mode}
         return self._request("POST", "/chat", json=body)
 
+    def list_conversations(self, dataset_id: str) -> list[dict]:
+        return self._request("GET", f"/datasets/{dataset_id}/conversations")
+
     def conversation(self, conversation_id: str) -> dict:
         return self._request("GET", f"/conversations/{conversation_id}")

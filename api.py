@@ -8,6 +8,7 @@ async def 안에서 부르면 그동안 서버 전체가 다른 요청을 처리
 일반 def로 두면 FastAPI가 요청마다 스레드 풀에서 실행한다.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -100,6 +101,33 @@ class DatasetOut(BaseModel):
     filename: str
     rows: int
     period: str
+    reused: bool  # 같은 파일·설정으로 이미 등록된 데이터셋을 돌려줬는지
+
+
+def dataset_out(dataset_id: str, filename: str, df: pd.DataFrame, reused: bool) -> DatasetOut:
+    return DatasetOut(
+        dataset_id=dataset_id,
+        filename=filename,
+        rows=len(df),
+        period=f"{df['date'].min():%Y-%m} ~ {df['date'].max():%Y-%m}",
+        reused=reused,
+    )
+
+
+def dataset_hash(data: bytes, mapping: dict, currency: str, encoding: str, date_format: str | None) -> str:
+    """파일 내용과 읽기 설정이 모두 같아야 같은 데이터셋이다. 매핑이 다르면 분석 결과도 다르기 때문이다."""
+    settings = json.dumps(
+        {"column_map": mapping, "currency": currency, "encoding": encoding, "date_format": date_format}, sort_keys=True
+    )
+    return hashlib.sha256(data + settings.encode()).hexdigest()
+
+
+class ConversationSummary(BaseModel):
+    conversation_id: str
+    title: str  # 첫 질문
+    turn_count: int
+    created_at: str
+    updated_at: str
 
 
 class ChatRequest(BaseModel):
@@ -169,22 +197,35 @@ def upload_dataset(
     except json.JSONDecodeError as e:
         raise HTTPException(422, f"column_map이 JSON이 아닙니다: {e}") from e
 
+    data = file.file.read()
+    date_format = date_format or None
+    # 같은 파일을 같은 설정으로 다시 올리면 기존 데이터셋을 돌려준다.
+    # 그래야 화면을 새로고침해도 데이터셋 id가 그대로라 이전 대화를 이어 갈 수 있다.
+    content_hash = dataset_hash(data, mapping, currency, encoding, date_format)
+    if (existing := db.find_dataset_by_hash(conn, content_hash)) is not None:
+        _, df = dataset_or_404(conn, existing["id"])
+        return dataset_out(existing["id"], existing["filename"], df, reused=True)
+
     path = data_dir() / "uploads" / f"{db.new_id()}.csv"
-    path.write_bytes(file.file.read())
+    path.write_bytes(data)
     try:
         # 저장 전에 실제로 읽어 본다. 매핑·인코딩·날짜 형식이 틀리면 여기서 걸러진다.
-        df = read_dataset(str(path), json.dumps(mapping), encoding, date_format or None)
+        df = read_dataset(str(path), json.dumps(mapping), encoding, date_format)
     except (ValueError, TypeError) as e:  # 없는 컬럼, 인코딩 오류, 날짜 형식 오류, 매핑의 역할 이름 오류
         path.unlink()
         raise HTTPException(422, f"CSV를 읽지 못했습니다. 컬럼 매핑·인코딩·날짜 형식을 확인하세요. ({e})") from e
 
-    dataset_id = db.create_dataset(conn, file.filename or "upload.csv", str(path), mapping, currency, encoding, date_format or None)
-    return DatasetOut(
-        dataset_id=dataset_id,
-        filename=file.filename or "upload.csv",
-        rows=len(df),
-        period=f"{df['date'].min():%Y-%m} ~ {df['date'].max():%Y-%m}",
-    )
+    filename = file.filename or "upload.csv"
+    dataset_id = db.create_dataset(conn, filename, str(path), mapping, currency, encoding, date_format, content_hash)
+    return dataset_out(dataset_id, filename, df, reused=False)
+
+
+@app.get("/datasets/{dataset_id}/conversations", response_model=list[ConversationSummary])
+def list_conversations(dataset_id: str, conn: Conn) -> list[ConversationSummary]:
+    """이전 대화 목록. 최근에 질문한 대화부터."""
+    if db.get_dataset(conn, dataset_id) is None:
+        raise HTTPException(404, f"데이터셋이 없습니다: {dataset_id}")
+    return [ConversationSummary(**c) for c in db.list_conversations(conn, dataset_id)]
 
 
 @app.get("/datasets/{dataset_id}/summary")

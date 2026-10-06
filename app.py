@@ -6,6 +6,7 @@
 """
 
 import io
+from datetime import datetime
 
 import pandas as pd
 import streamlit as st
@@ -33,6 +34,7 @@ OPTIONAL_ROLES = {
     "segment": ("고객 세그먼트", ["segment", "세그먼트"]),
 }
 NONE = "(없음)"
+NEW_CONVERSATION = "new"  # 대화 선택 상자에서 "새 대화"를 뜻하는 값
 
 
 def api() -> ApiClient:
@@ -176,12 +178,38 @@ def show_turn(turn: dict) -> None:
                     st.code(f"{tool['name']}({tool['arguments']})", language="json")
 
 
+def local_time(iso: str) -> str:
+    # DB에는 UTC로 저장되어 있으므로, 화면에는 이 컴퓨터의 시간대로 보여준다.
+    return datetime.fromisoformat(iso).astimezone().strftime("%m-%d %H:%M")
+
+
+def pick_conversation(dataset: dict) -> None:
+    """사이드바에서 이전 대화를 고르면 그 대화의 질문·답변을 불러온다."""
+    conversations = api().list_conversations(dataset["dataset_id"])
+    labels = {NEW_CONVERSATION: "＋ 새 대화"}
+    for c in conversations:
+        title = c["title"] if len(c["title"]) <= 20 else c["title"][:20] + "…"
+        labels[c["conversation_id"]] = f"{local_time(c['updated_at'])} · {title} ({c['turn_count']})"
+
+    current = st.session_state.conversation_id or NEW_CONVERSATION
+    options = list(labels)
+    picked = st.sidebar.selectbox(
+        "대화", options, index=options.index(current) if current in options else 0, format_func=labels.get
+    )
+    if picked == current:
+        return
+    if picked == NEW_CONVERSATION:
+        st.session_state.conversation_id = None
+        st.session_state.turns = []
+    else:
+        st.session_state.conversation_id = picked
+        st.session_state.turns = api().conversation(picked)["turns"]
+
+
 def show_chat(dataset: dict) -> None:
     st.subheader("AI 분석가에게 질문하기")
     mode = st.sidebar.radio("답변 모드", list(MODES), format_func=MODES.get, index=1)
-    if st.sidebar.button("새 대화"):
-        st.session_state.conversation_id = None
-        st.session_state.turns = []
+    pick_conversation(dataset)
 
     for turn in st.session_state.turns:
         show_turn(turn)
@@ -196,9 +224,9 @@ def show_chat(dataset: dict) -> None:
             st.error(str(e))
             return
     st.session_state.conversation_id = result["conversation_id"]
-    turn = {"question": question, **result}
-    st.session_state.turns.append(turn)
-    show_turn(turn)
+    st.session_state.turns.append({"question": question, **result})
+    # 사이드바의 대화 목록에도 방금 질문이 반영되도록 화면을 다시 그린다.
+    st.rerun()
 
 
 def main() -> None:

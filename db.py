@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS datasets (
     currency    TEXT NOT NULL,
     encoding    TEXT NOT NULL,
     date_format TEXT,
-    created_at  TEXT NOT NULL
+    created_at  TEXT NOT NULL,
+    content_hash TEXT  -- 파일 내용 + 읽기 설정의 해시. 같은 업로드면 기존 데이터셋을 재사용한다
 );
 CREATE TABLE IF NOT EXISTS conversations (
     id         TEXT PRIMARY KEY,
@@ -68,6 +69,14 @@ def connect(path: str | Path) -> sqlite3.Connection:
 
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    # CREATE TABLE IF NOT EXISTS는 이미 있는 테이블을 바꾸지 않는다.
+    # content_hash가 생기기 전에 만든 DB 파일이면 컬럼을 추가한다 (가장 단순한 마이그레이션).
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(datasets)")}
+    if "content_hash" not in columns:
+        conn.execute("ALTER TABLE datasets ADD COLUMN content_hash TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_datasets_content_hash ON datasets(content_hash)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_conversations_dataset ON conversations(dataset_id)")
+    conn.commit()
 
 
 # ---------------------------------------------------------------- 데이터셋
@@ -81,14 +90,22 @@ def create_dataset(
     currency: str,
     encoding: str,
     date_format: str | None,
+    content_hash: str | None = None,
 ) -> str:
     dataset_id = new_id()
     with conn:  # 블록이 끝나면 commit, 예외가 나면 rollback
+        # 마이그레이션으로 추가한 컬럼은 테이블 끝에 붙으므로, 순서에 기대지 않고 컬럼 이름을 적는다.
         conn.execute(
-            "INSERT INTO datasets VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (dataset_id, filename, path, json.dumps(column_map), currency, encoding, date_format, now()),
+            "INSERT INTO datasets (id, filename, path, column_map, currency, encoding, date_format, created_at, content_hash) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (dataset_id, filename, path, json.dumps(column_map), currency, encoding, date_format, now(), content_hash),
         )
     return dataset_id
+
+
+def find_dataset_by_hash(conn: sqlite3.Connection, content_hash: str) -> dict | None:
+    row = conn.execute("SELECT id FROM datasets WHERE content_hash = ? LIMIT 1", (content_hash,)).fetchone()
+    return get_dataset(conn, row["id"]) if row else None
 
 
 def get_dataset(conn: sqlite3.Connection, dataset_id: str) -> dict | None:
@@ -111,6 +128,36 @@ def create_conversation(conn: sqlite3.Connection, dataset_id: str) -> str:
 def get_conversation(conn: sqlite3.Connection, conversation_id: str) -> dict | None:
     row = conn.execute("SELECT * FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
     return dict(row) if row else None
+
+
+def list_conversations(conn: sqlite3.Connection, dataset_id: str) -> list[dict]:
+    """데이터셋의 대화 목록. 최근에 질문한 대화부터, 첫 질문을 제목처럼 함께 돌려준다."""
+    rows = conn.execute(
+        """
+        SELECT c.id,
+               c.created_at,
+               MAX(t.created_at) AS updated_at,
+               COUNT(t.id)       AS turn_count,
+               (SELECT question FROM turns WHERE conversation_id = c.id ORDER BY id LIMIT 1) AS title
+        FROM conversations c
+        JOIN turns t ON t.conversation_id = c.id
+        WHERE c.dataset_id = ?
+        GROUP BY c.id
+        -- created_at은 초 단위라 같은 초에 질문하면 순서가 갈린다. turn id는 항상 늘어나므로 이것으로 정렬한다.
+        ORDER BY MAX(t.id) DESC
+        """,
+        (dataset_id,),
+    ).fetchall()
+    return [
+        {
+            "conversation_id": row["id"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "turn_count": row["turn_count"],
+            "title": row["title"],
+        }
+        for row in rows
+    ]
 
 
 def load_history(conn: sqlite3.Connection, conversation_id: str) -> list[dict]:

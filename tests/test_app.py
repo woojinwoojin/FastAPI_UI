@@ -55,6 +55,32 @@ def test_chat_shows_answer_and_tools(server):
     assert client.requests[0]["reasoning"] == {"effort": "low"}
 
 
+def conversation_box(at: AppTest):
+    return next(box for box in at.selectbox if box.label == "대화")
+
+
+def test_previous_conversation_can_be_loaded_after_refresh(server):
+    api.app.dependency_overrides[api.get_client] = lambda: FakeClient([final_response()])
+    first_session = run_app()
+    first_session.chat_input[0].set_value("Furniture 이익률이 왜 낮아?").run()
+    conversation_id = first_session.session_state.conversation_id
+
+    # 새로고침 = 새 세션. 예시 데이터를 다시 올려도 같은 데이터셋으로 인식되어야 이전 대화가 보인다.
+    at = run_app()
+    box = conversation_box(at)
+    assert box.value == "new"  # 새 세션은 새 대화로 시작한다
+    # options는 화면에 보이는 이름이다: "새 대화"와 "시간 · 첫 질문 (질문 수)"
+    assert len(box.options) == 2
+    assert box.options[1].endswith("· Furniture 이익률이 왜 낮아? (1)")
+
+    box.set_value(conversation_id).run()
+
+    assert not at.exception
+    rendered = [md.value for md in at.markdown]
+    assert "Furniture 이익률이 왜 낮아?" in rendered
+    assert FINAL["answer"] in rendered
+
+
 def test_tilde_ranges_are_not_strikethrough(server):
     # ~ 두 개 사이가 취소선으로 그려지지 않도록, 화면에 그리기 전에 이스케이프해야 한다.
     answer = {

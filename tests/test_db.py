@@ -65,3 +65,37 @@ def test_failed_save_leaves_nothing(conn, conversation_id):
 
     assert db.load_history(conn, conversation_id) == []
     assert db.list_turns(conn, conversation_id) == []
+
+
+def test_init_db_adds_content_hash_to_old_database(tmp_path):
+    # content_hash 컬럼이 생기기 전에 만든 DB 파일을 흉내 낸다.
+    conn = db.connect(tmp_path / "old.db")
+    conn.execute(
+        "CREATE TABLE datasets (id TEXT PRIMARY KEY, filename TEXT NOT NULL, path TEXT NOT NULL, column_map TEXT NOT NULL,"
+        " currency TEXT NOT NULL, encoding TEXT NOT NULL, date_format TEXT, created_at TEXT NOT NULL)"
+    )
+    conn.execute("INSERT INTO datasets VALUES ('old', 'a.csv', '/a.csv', '{}', 'USD', 'utf-8', NULL, 'now')")
+
+    db.init_db(conn)
+    dataset_id = db.create_dataset(conn, "b.csv", "/b.csv", {}, "USD", "utf-8", None, "hash-b")
+
+    assert db.get_dataset(conn, "old")["content_hash"] is None  # 기존 행은 그대로 남는다
+    assert db.find_dataset_by_hash(conn, "hash-b")["id"] == dataset_id
+    conn.close()
+
+
+def test_list_conversations_skips_empty_and_orders_by_last_question(conn):
+    dataset_id = db.create_dataset(conn, "a.csv", "/a.csv", {}, "USD", "utf-8", None)
+    first = db.create_conversation(conn, dataset_id)
+    second = db.create_conversation(conn, dataset_id)
+    db.create_conversation(conn, dataset_id)  # 질문이 없는 대화는 목록에 나오지 않는다
+    db.save_turn(conn, first, "첫 질문", "fast", ANSWER, [], USAGE, [])
+    db.save_turn(conn, second, "둘째", "fast", ANSWER, [], USAGE, [])
+    db.save_turn(conn, first, "이어서", "fast", ANSWER, [], USAGE, [])  # 같은 초 안에 질문해도 first가 최근이다
+
+    listed = db.list_conversations(conn, dataset_id)
+
+    assert [(c["conversation_id"], c["title"], c["turn_count"]) for c in listed] == [
+        (first, "첫 질문", 2),
+        (second, "둘째", 1),
+    ]
